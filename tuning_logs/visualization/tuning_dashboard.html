@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BitNet Tuning Visualization</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg: #f4f1ea;
+      --panel: #fffdf8;
+      --ink: #232323;
+      --muted: #6b6b6b;
+      --accent-a: #1f6f8b;
+      --accent-b: #d1495b;
+      --line: #e3dbcf;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 10% 10%, #efe6d6 0%, transparent 45%),
+        radial-gradient(circle at 90% 0%, #e3efe8 0%, transparent 35%),
+        var(--bg);
+    }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    p { margin: 0 0 18px; color: var(--muted); }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.04);
+    }
+    .card h2 { margin: 0 0 12px; font-size: 18px; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 8px; text-align: left; white-space: nowrap; }
+    th { background: #f8f4ec; }
+    .footer { margin-top: 14px; font-size: 12px; color: var(--muted); }
+    @media (min-width: 900px) {
+      .grid { grid-template-columns: 1fr 1fr; }
+      .span-2 { grid-column: span 2; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>BitNet Kernel Tuning Dashboard</h1>
+    <p>Generated from <code>tuning_log_tl*_summary_desc.csv</code> files.</p>
+
+    <div class="grid">
+      <section class="card">
+        <h2>Top Throughput by Model</h2>
+        <canvas id="barTop"></canvas>
+      </section>
+
+      <section class="card">
+        <h2>Top-10 Candidate Curves</h2>
+        <canvas id="lineTop10"></canvas>
+      </section>
+
+      <section class="card span-2">
+        <h2>Best Configs (All Model/Arch)</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Model</th><th>Arch</th><th>TPS</th><th>M</th><th>K</th><th>BM</th><th>BK</th><th>bm</th><th>avg_latency_s</th><th>source</th>
+              </tr>
+            </thead>
+            <tbody id="bestTable"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <div class="footer">Output: tuning_logs/visualization/tuning_dashboard.html</div>
+  </div>
+
+  <script>
+    const data = {"models": ["Llama-1B", "Llama-80M", "Llama-120M", "Llama-300M", "Llama-500M", "Llama-700M"], "tl1": [27.856616560782157, 326.49423812078516, 207.11975048411028, 138.0293798209876, 33.34651561042439, 43.031705224536026], "tl2": [44.54043095995644, 337.2578145704397, 217.91200078053689, 81.06511864709148, 84.96290469798132, 45.8857227059982], "top_rows": [{"model": "Llama-80M", "arch": "tl2", "tokens_per_second": 337.2578145704397, "M": 512, "K": 512, "BM": 32, "BK": 192, "bm": 32, "avg_latency_s": 0.03165542375296354, "source": "tuning_logs\\Llama-80M\\tuning_log_tl2_summary_desc.csv"}, {"model": "Llama-80M", "arch": "tl1", "tokens_per_second": 326.49423812078516, "M": 512, "K": 512, "BM": 256, "BK": 256, "bm": 64, "avg_latency_s": 0.00869068806990981, "source": "tuning_logs\\Llama-80M\\tuning_log_tl1_summary_desc.csv"}, {"model": "Llama-120M", "arch": "tl2", "tokens_per_second": 217.91200078053689, "M": 768, "K": 768, "BM": 32, "BK": 192, "bm": 32, "avg_latency_s": 0.016366847567260263, "source": "tuning_logs\\Llama-120M\\tuning_log_tl2_summary_desc.csv"}, {"model": "Llama-120M", "arch": "tl1", "tokens_per_second": 207.11975048411028, "M": 768, "K": 768, "BM": 64, "BK": 256, "bm": 64, "avg_latency_s": 0.009764928007498383, "source": "tuning_logs\\Llama-120M\\tuning_log_tl1_summary_desc.csv"}, {"model": "Llama-300M", "arch": "tl1", "tokens_per_second": 138.0293798209876, "M": 1024, "K": 1024, "BM": 64, "BK": 256, "bm": 64, "avg_latency_s": 0.011431936174631119, "source": "tuning_logs\\Llama-300M\\tuning_log_tl1_summary_desc.csv"}, {"model": "Llama-500M", "arch": "tl2", "tokens_per_second": 84.96290469798132, "M": 1280, "K": 1280, "BM": 320, "BK": 192, "bm": 32, "avg_latency_s": 0.04048127988353371, "source": "tuning_logs\\Llama-500M\\tuning_log_tl2_summary_desc.csv"}, {"model": "Llama-300M", "arch": "tl2", "tokens_per_second": 81.06511864709148, "M": 1024, "K": 1024, "BM": 512, "BK": 192, "bm": 32, "avg_latency_s": 0.02174975976347923, "source": "tuning_logs\\Llama-300M\\tuning_log_tl2_summary_desc.csv"}, {"model": "Llama-700M", "arch": "tl2", "tokens_per_second": 45.8857227059982, "M": 1536, "K": 1536, "BM": 192, "BK": 192, "bm": 32, "avg_latency_s": 0.1583708167076111, "source": "tuning_logs\\Llama-700M\\tuning_log_tl2_summary_desc.csv"}, {"model": "Llama-1B", "arch": "tl2", "tokens_per_second": 44.54043095995644, "M": 2048, "K": 2048, "BM": 128, "BK": 192, "bm": 32, "avg_latency_s": 0.03654041640460491, "source": "tuning_logs\\Llama-1B\\tuning_log_tl2_summary_desc.csv"}, {"model": "Llama-700M", "arch": "tl1", "tokens_per_second": 43.031705224536026, "M": 1536, "K": 1536, "BM": 64, "BK": 256, "bm": 64, "avg_latency_s": 0.02711347276344895, "source": "tuning_logs\\Llama-700M\\tuning_log_tl1_summary_desc.csv"}, {"model": "Llama-500M", "arch": "tl1", "tokens_per_second": 33.34651561042439, "M": 1280, "K": 1280, "BM": 64, "BK": 256, "bm": 64, "avg_latency_s": 0.031243999837897718, "source": "tuning_logs\\Llama-500M\\tuning_log_tl1_summary_desc.csv"}, {"model": "Llama-1B", "arch": "tl1", "tokens_per_second": 27.856616560782157, "M": 2048, "K": 2048, "BM": 512, "BK": 256, "bm": 64, "avg_latency_s": 0.06974873542785645, "source": "tuning_logs\\Llama-1B\\tuning_log_tl1_summary_desc.csv"}], "rank_curves": {"Llama-120M-TL1": [207.11975048411028, 207.11975048411028, 207.11975048411028, 207.11975048411028, 203.60089649319482, 203.07453683957013, 200.89575047568786, 197.80863903334372, 194.67212921531893, 186.51093240281565], "Llama-120M-TL2": [217.91200078053689, 217.91200078053689, 217.91200078053689, 217.91200078053689, 190.54778870984032, 188.57880998089175, 184.31826138538065, 171.26764122572274, 166.63949760131757, 164.81022609294575], "Llama-1B-TL1": [27.856616560782157, 27.856616560782157, 27.856616560782157, 27.856616560782157, 26.697981184089457, 25.65834988976817, 25.310481975034314, 25.286655150996577, 25.00033610414736, 23.697209232138444], "Llama-1B-TL2": [44.54043095995644, 44.54043095995644, 44.54043095995644, 44.54043095995644, 44.2471762426158, 44.1285864789334, 44.118820897466314, 43.66550580030711, 43.61109193204459, 43.48075070048482], "Llama-300M-TL1": [138.0293798209876, 138.0293798209876, 138.0293798209876, 138.0293798209876, 119.67487187477516, 116.63717863390589, 106.28043591064008, 104.99600837286644, 103.27457800074022, 103.21153653714114], "Llama-300M-TL2": [81.06511864709148, 81.06511864709148, 81.06511864709148, 81.06511864709148, 79.43820287433842, 74.80983384134817, 74.4810469296963, 74.4763372562162, 73.90602774663883, 62.842019361647516], "Llama-500M-TL1": [33.34651561042439, 33.34651561042439, 33.34651561042439, 33.34651561042439, 29.106398772201903, 26.097947540283634, 25.522547402831552, 24.223517932140403, 23.169387590837097, 21.59293132957285], "Llama-500M-TL2": [84.96290469798132, 84.96290469798132, 84.96290469798132, 84.96290469798132, 78.88901515729508, 72.07792974798983, 70.90510209668939, 63.88002783980271, 57.74421651467625, 56.438989490309254], "Llama-700M-TL1": [43.031705224536026, 43.031705224536026, 43.031705224536026, 43.031705224536026, 37.68537952562815, 35.70073869161219, 34.82886082903852, 32.299854097223644, 31.9048089841213, 29.03320289061078], "Llama-700M-TL2": [45.8857227059982, 45.8857227059982, 45.8857227059982, 45.8857227059982, 39.67212785750834, 33.75594956193873, 33.082718374771915, 32.23366551078122, 30.079175263357552, 30.05881878325471], "Llama-80M-TL1": [326.49423812078516, 326.49423812078516, 326.49423812078516, 326.49423812078516, 308.89788864018794, 299.8436437360041, 260.5113245191467, 217.0192959438833, 210.04228639202495, 180.3494763418404], "Llama-80M-TL2": [337.2578145704397, 337.2578145704397, 337.2578145704397, 337.2578145704397, 321.6320343640125, 270.5055449834499, 233.07718009081597, 227.49891331408915, 223.84217669589304, 212.71369821558872]}};
+
+    const curveLabels = Array.from({length: 10}, (_, i) => `rank ${i + 1}`);
+    const curveDatasets = Object.entries(data.rank_curves).map(([name, vals], i) => {
+      const hue = (i * 29) % 360;
+      return {
+        label: name,
+        data: vals,
+        borderColor: `hsl(${hue}, 60%, 45%)`,
+        backgroundColor: `hsla(${hue}, 60%, 45%, 0.15)`,
+        tension: 0.25,
+        fill: false
+      };
+    });
+
+    if (typeof Chart !== 'undefined') {
+      new Chart(document.getElementById('barTop'), {
+        type: 'bar',
+        data: {
+          labels: data.models,
+          datasets: [
+            { label: 'TL1', data: data.tl1, backgroundColor: 'rgba(31,111,139,0.75)' },
+            { label: 'TL2', data: data.tl2, backgroundColor: 'rgba(209,73,91,0.75)' }
+          ]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { position: 'top' } },
+          scales: { y: { title: { display: true, text: 'tokens/s' } } }
+        }
+      });
+
+      new Chart(document.getElementById('lineTop10'), {
+        type: 'line',
+        data: { labels: curveLabels, datasets: curveDatasets },
+        options: {
+          responsive: true,
+          plugins: { legend: { position: 'bottom' } },
+          scales: { y: { title: { display: true, text: 'tokens/s' } } }
+        }
+      });
+    } else {
+      console.warn('Chart.js failed to load. Rendering table only.');
+    }
+
+    const tbody = document.getElementById('bestTable');
+    data.top_rows.forEach(r => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${r.model}</td>
+        <td>${r.arch.toUpperCase()}</td>
+        <td>${r.tokens_per_second.toFixed(3)}</td>
+        <td>${r.M}</td>
+        <td>${r.K}</td>
+        <td>${r.BM}</td>
+        <td>${r.BK}</td>
+        <td>${r.bm}</td>
+        <td>${r.avg_latency_s.toExponential(3)}</td>
+        <td><code>${r.source}</code></td>
+      `;
+      tbody.appendChild(tr);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+build/
+dist/
+*.egg-info/
+cmake-build-*/
+compile_commands.json
+
+logs/
+models/
+checkpoints/
+
+include/bitnet-lut-kernels.h
+include/kernel_config.ini

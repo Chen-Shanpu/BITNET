@@ -42,15 +42,74 @@ Usage:
 """
 
 import argparse
+import csv
 import json
 import math
 import os
+import platform
 import sys
 import time
 from collections import defaultdict
 from configparser import ConfigParser
 from datetime import datetime, timezone
 from itertools import product
+
+
+# =============================================================================
+# Hardware Information
+# =============================================================================
+
+def get_hardware_info():
+    """
+    Collect hardware and OS information for the tuning environment.
+
+    Returns
+    -------
+    dict
+        Keys: cpu_model, cpu_arch, cpu_cores_physical, cpu_cores_logical,
+        ram_total_gb, os, os_version, python_version.
+    """
+    import multiprocessing
+
+    info = {
+        "cpu_model": platform.processor() or "unknown",
+        "cpu_arch": platform.machine(),
+        "cpu_cores_physical": None,
+        "cpu_cores_logical": multiprocessing.cpu_count(),
+        "ram_total_gb": None,
+        "os": platform.system(),
+        "os_version": platform.version(),
+        "python_version": platform.python_version(),
+    }
+
+    # Try to get physical core count (Linux /proc/cpuinfo or os.sched_getaffinity)
+    try:
+        info["cpu_cores_physical"] = len(os.sched_getaffinity(0))
+    except AttributeError:
+        info["cpu_cores_physical"] = info["cpu_cores_logical"]
+
+    # Try to read /proc/cpuinfo for a better CPU model name (Linux)
+    try:
+        with open("/proc/cpuinfo", "r") as fh:
+            for line in fh:
+                if line.startswith("model name"):
+                    info["cpu_model"] = line.split(":", 1)[1].strip()
+                    break
+    except OSError:
+        pass
+
+    # Try to read total RAM
+    try:
+        with open("/proc/meminfo", "r") as fh:
+            for line in fh:
+                if line.startswith("MemTotal"):
+                    kb = int(line.split()[1])
+                    info["ram_total_gb"] = round(kb / (1024 * 1024), 2)
+                    break
+    except OSError:
+        pass
+
+    return info
 
 
 # =============================================================================
@@ -446,21 +505,20 @@ def benchmark_candidates(model_name, config_path, unique_shapes, arch,
     config = LlamaConfig(**cfg_dict)
     model = LlamaForCausalLM(config)
 
-    # Run the model-level benchmark
+    # Run the model-level benchmark (used only for reference logging)
     bench = benchmark_model_forward(
         model, tokenizer=None,
         sequence_length=sequence_length,
         batch_size=batch_size,
         num_runs=num_runs,
     )
-    base_latency = bench["avg_latency_s"]
-    base_tps = bench["tokens_per_second"]
 
     del model
 
     # Benchmark each candidate with a candidate-specific tiled microbenchmark.
-    # The absolute throughput is anchored to the measured model forward pass,
-    # while candidate rankings come from real blocked matmul timings.
+    # tokens_per_second is derived from the per-shape estimated latency so that
+    # different shapes correctly show different throughputs.
+    total_tokens = batch_size * sequence_length
     all_candidates = []
     for M, K in unique_shapes:
         configs = generate_configs_for_shape(M, K, arch)
@@ -478,11 +536,9 @@ def benchmark_candidates(model_name, config_path, unique_shapes, arch,
                 )
             )
 
-        best_latency = min(lat["estimated_latency_s"] for lat in candidate_latencies)
-
         for (bm_val, bk_val, bmm_val), latency_info in zip(configs, candidate_latencies):
-            relative_speedup = best_latency / latency_info["estimated_latency_s"]
-            candidate_tps = base_tps * relative_speedup
+            est_lat = latency_info["estimated_latency_s"]
+            candidate_tps = total_tokens / est_lat if est_lat > 0 else 0.0
             all_candidates.append({
                 "model_name": model_name,
                 "M": M,
@@ -493,7 +549,7 @@ def benchmark_candidates(model_name, config_path, unique_shapes, arch,
                 "BM": bm_val,
                 "BK": bk_val,
                 "bm": bmm_val,
-                "avg_latency_s": latency_info["estimated_latency_s"],
+                "avg_latency_s": est_lat,
                 "tile_latency_s": latency_info["tile_latency_s"],
                 "tokens_per_second": candidate_tps,
             })
@@ -558,7 +614,7 @@ def _benchmark_candidate_shape_matmul(M, K, BM, BK, bmm, sequence_length, num_ru
 # Tuning Log I/O
 # =============================================================================
 
-def save_tuning_log(model_name, arch, candidates, log_dir):
+def save_tuning_log(model_name, arch, candidates, log_dir, hardware_info=None):
     """
     Save the full tuning log for *model_name* / *arch* to a JSON file
     inside *log_dir*.
@@ -571,6 +627,8 @@ def save_tuning_log(model_name, arch, candidates, log_dir):
         Output of :func:`benchmark_candidates`.
     log_dir : str
         Root tuning logs directory (e.g. ``tuning_logs``).
+    hardware_info : dict or None
+        Output of :func:`get_hardware_info`.  Included in the log when given.
 
     Returns
     -------
@@ -588,6 +646,8 @@ def save_tuning_log(model_name, arch, candidates, log_dir):
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "candidates": candidates,
     }
+    if hardware_info is not None:
+        log_data["hardware"] = hardware_info
 
     with open(filepath, "w") as fh:
         json.dump(log_data, fh, indent=2)
@@ -599,6 +659,62 @@ def load_tuning_log(filepath):
     """Load a previously saved tuning log JSON file."""
     with open(filepath, "r") as fh:
         return json.load(fh)
+
+
+# =============================================================================
+# CSV Export
+# =============================================================================
+
+CSV_FIELDNAMES = [
+    "model_name", "arch", "M", "K",
+    "ROW_BLOCK_SIZE", "COL_BLOCK_SIZE", "PARALLEL_SIZE",
+    "BM", "BK", "bm",
+    "avg_latency_s", "tile_latency_s", "tokens_per_second", "rank",
+]
+
+
+def save_tuning_csv(model_name, arch, candidates, csv_path):
+    """
+    Save benchmark candidates to a CSV file.
+
+    Parameters
+    ----------
+    model_name : str
+    arch : str
+    candidates : list[dict]
+        Output of :func:`benchmark_candidates`.
+    csv_path : str
+        Destination CSV file path.
+
+    Returns
+    -------
+    str
+        The *csv_path* that was written.
+    """
+    os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=CSV_FIELDNAMES)
+        writer.writeheader()
+        for c in sorted(candidates, key=lambda x: (x["M"], x["K"], x["rank"])):
+            writer.writerow({
+                "model_name": c.get("model_name", model_name),
+                "arch": arch,
+                "M": c["M"],
+                "K": c["K"],
+                "ROW_BLOCK_SIZE": c["ROW_BLOCK_SIZE"],
+                "COL_BLOCK_SIZE": c["COL_BLOCK_SIZE"],
+                "PARALLEL_SIZE": c["PARALLEL_SIZE"],
+                "BM": c["BM"],
+                "BK": c["BK"],
+                "bm": c["bm"],
+                "avg_latency_s": c["avg_latency_s"],
+                "tile_latency_s": c.get("tile_latency_s", ""),
+                "tokens_per_second": c["tokens_per_second"],
+                "rank": c["rank"],
+            })
+
+    return csv_path
 
 
 # =============================================================================

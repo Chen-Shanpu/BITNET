@@ -20,7 +20,9 @@ from utils.kernel_tuner import (
     benchmark_candidates,
     benchmark_model_forward,
     generate_configs_for_shape,
+    get_hardware_info,
     load_tuning_log,
+    save_tuning_csv,
     save_tuning_log,
     select_default_config,
 )
@@ -210,3 +212,140 @@ class TestTuningLogIO:
         loaded = load_tuning_log(path)
         assert "generated_at" in loaded
         assert "UTC" in loaded["generated_at"]
+
+    def test_log_contains_hardware_info(self, tmp_path):
+        candidates = self._sample_candidates()
+        hw = {"cpu_model": "Test CPU", "cpu_arch": "x86_64"}
+        path = save_tuning_log("Llama-80M", "tl1", candidates, str(tmp_path),
+                               hardware_info=hw)
+        loaded = load_tuning_log(path)
+        assert "hardware" in loaded
+        assert loaded["hardware"]["cpu_model"] == "Test CPU"
+
+
+# ---------------------------------------------------------------------------
+# Tests for get_hardware_info
+# ---------------------------------------------------------------------------
+
+class TestGetHardwareInfo:
+    """Tests for the get_hardware_info() function."""
+
+    def test_returns_dict(self):
+        info = get_hardware_info()
+        assert isinstance(info, dict)
+
+    def test_contains_required_keys(self):
+        info = get_hardware_info()
+        for key in ["cpu_model", "cpu_arch", "cpu_cores_logical",
+                     "os", "python_version"]:
+            assert key in info, f"Missing key: {key}"
+
+    def test_cpu_arch_non_empty(self):
+        info = get_hardware_info()
+        assert info["cpu_arch"]
+
+    def test_python_version_format(self):
+        info = get_hardware_info()
+        parts = info["python_version"].split(".")
+        assert len(parts) >= 2
+
+
+# ---------------------------------------------------------------------------
+# Tests for save_tuning_csv
+# ---------------------------------------------------------------------------
+
+class TestSaveTuningCSV:
+    """Tests for the save_tuning_csv() function."""
+
+    def _sample_candidates(self):
+        return [
+            {
+                "model_name": "Llama-80M",
+                "M": 512, "K": 512,
+                "ROW_BLOCK_SIZE": 128, "COL_BLOCK_SIZE": 64,
+                "PARALLEL_SIZE": 64,
+                "BM": 128, "BK": 64, "bm": 64,
+                "avg_latency_s": 0.01,
+                "tile_latency_s": 0.0001,
+                "tokens_per_second": 12800.0,
+                "rank": 1,
+            },
+            {
+                "model_name": "Llama-80M",
+                "M": 512, "K": 512,
+                "ROW_BLOCK_SIZE": 64, "COL_BLOCK_SIZE": 64,
+                "PARALLEL_SIZE": 32,
+                "BM": 64, "BK": 64, "bm": 32,
+                "avg_latency_s": 0.02,
+                "tile_latency_s": 0.0002,
+                "tokens_per_second": 6400.0,
+                "rank": 2,
+            },
+        ]
+
+    def test_creates_csv_file(self, tmp_path):
+        candidates = self._sample_candidates()
+        csv_path = str(tmp_path / "test.csv")
+        result = save_tuning_csv("Llama-80M", "tl1", candidates, csv_path)
+        assert os.path.exists(result)
+
+    def test_csv_has_header_and_rows(self, tmp_path):
+        import csv as csv_mod
+        candidates = self._sample_candidates()
+        csv_path = str(tmp_path / "test.csv")
+        save_tuning_csv("Llama-80M", "tl1", candidates, csv_path)
+        with open(csv_path) as f:
+            reader = csv_mod.DictReader(f)
+            rows = list(reader)
+        assert len(rows) == 2
+        assert "arch" in reader.fieldnames
+        assert "tokens_per_second" in reader.fieldnames
+
+    def test_csv_arch_column(self, tmp_path):
+        import csv as csv_mod
+        candidates = self._sample_candidates()
+        csv_path = str(tmp_path / "test.csv")
+        save_tuning_csv("Llama-80M", "tl2", candidates, csv_path)
+        with open(csv_path) as f:
+            rows = list(csv_mod.DictReader(f))
+        assert rows[0]["arch"] == "tl2"
+
+
+# ---------------------------------------------------------------------------
+# Tests for tokens_per_second correctness
+# ---------------------------------------------------------------------------
+
+class TestTokensPerSecondCorrectness:
+    """Verify that tokens_per_second varies across shapes."""
+
+    @pytest.fixture
+    def tiny_config_path(self, tmp_path):
+        config = {
+            "architectures": ["LlamaForCausalLM"],
+            "model_type": "llama",
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "vocab_size": 256,
+            "max_position_embeddings": 256,
+        }
+        path = tmp_path / "config.json"
+        with open(path, "w") as f:
+            json.dump(config, f)
+        return str(path)
+
+    def test_different_shapes_have_different_tps(self, tiny_config_path):
+        """Rank-1 candidates of differently sized shapes must not share
+        the same tokens_per_second value."""
+        shapes = [[64, 128], [128, 64]]
+        candidates = benchmark_candidates(
+            "test-model", tiny_config_path, shapes, "tl1",
+            sequence_length=8, batch_size=1, num_runs=2,
+        )
+        rank1 = [c for c in candidates if c["rank"] == 1]
+        tps_values = {c["tokens_per_second"] for c in rank1}
+        # With the corrected formula, differently sized shapes produce
+        # distinct per-shape throughput values.
+        assert len(tps_values) > 1 or len(rank1) <= 1

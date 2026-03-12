@@ -1,6 +1,18 @@
 # BitNet Kernel Tuning Report
 
-Generated on 2026-03-11 07:59:48 UTC
+Generated on 2026-03-12 01:04:36 UTC
+
+## Hardware Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| CPU Model | AMD EPYC 7763 64-Core Processor |
+| CPU Architecture | x86_64 |
+| Physical Cores | 4 |
+| Logical Cores | 4 |
+| RAM | 15.62 GB |
+| OS | Linux #17~24.04.1-Ubuntu SMP Mon Dec  1 20:10:50 UTC 2025 |
+| Python | 3.12.3 |
 
 ## Models
 
@@ -42,7 +54,7 @@ Generated on 2026-03-11 07:59:48 UTC
 | 512 | 1408 | 128 | 64 | 64 | 27 |
 | 32000 | 512 | 128 | 64 | 64 | 40 |
 
-Config saved to: `tuned_kernels\Llama-80M\kernel_config_tl1.ini`
+Config saved to: `tuned_kernels/Llama-80M/kernel_config_tl1.ini`
 
 ### TL2 (x86 AVX2) Tuning Results
 
@@ -53,7 +65,7 @@ Config saved to: `tuned_kernels\Llama-80M\kernel_config_tl1.ini`
 | 512 | 1408 | 128 | 96 | 32 | 10 |
 | 32000 | 512 | 128 | 96 | 32 | 12 |
 
-Config saved to: `tuned_kernels\Llama-80M\kernel_config_tl2.ini`
+Config saved to: `tuned_kernels/Llama-80M/kernel_config_tl2.ini`
 
 ---
 
@@ -88,7 +100,7 @@ Config saved to: `tuned_kernels\Llama-80M\kernel_config_tl2.ini`
 | 768 | 2048 | 128 | 128 | 64 | 44 |
 | 32000 | 768 | 128 | 64 | 64 | 40 |
 
-Config saved to: `tuned_kernels\Llama-120M\kernel_config_tl1.ini`
+Config saved to: `tuned_kernels/Llama-120M/kernel_config_tl1.ini`
 
 ### TL2 (x86 AVX2) Tuning Results
 
@@ -99,7 +111,7 @@ Config saved to: `tuned_kernels\Llama-120M\kernel_config_tl1.ini`
 | 768 | 2048 | 128 | 96 | 32 | 12 |
 | 32000 | 768 | 128 | 96 | 32 | 12 |
 
-Config saved to: `tuned_kernels\Llama-120M\kernel_config_tl2.ini`
+Config saved to: `tuned_kernels/Llama-120M/kernel_config_tl2.ini`
 
 ---
 
@@ -134,7 +146,7 @@ Config saved to: `tuned_kernels\Llama-120M\kernel_config_tl2.ini`
 | 1024 | 2816 | 128 | 128 | 64 | 36 |
 | 32000 | 1024 | 128 | 64 | 64 | 40 |
 
-Config saved to: `tuned_kernels\Llama-300M\kernel_config_tl1.ini`
+Config saved to: `tuned_kernels/Llama-300M/kernel_config_tl1.ini`
 
 ### TL2 (x86 AVX2) Tuning Results
 
@@ -145,7 +157,7 @@ Config saved to: `tuned_kernels\Llama-300M\kernel_config_tl1.ini`
 | 1024 | 2816 | 128 | 96 | 32 | 10 |
 | 32000 | 1024 | 128 | 96 | 32 | 12 |
 
-Config saved to: `tuned_kernels\Llama-300M\kernel_config_tl2.ini`
+Config saved to: `tuned_kernels/Llama-300M/kernel_config_tl2.ini`
 
 ---
 
@@ -180,7 +192,7 @@ Config saved to: `tuned_kernels\Llama-300M\kernel_config_tl2.ini`
 | 1280 | 3456 | 128 | 128 | 64 | 30 |
 | 32000 | 1280 | 128 | 64 | 64 | 40 |
 
-Config saved to: `tuned_kernels\Llama-500M\kernel_config_tl1.ini`
+Config saved to: `tuned_kernels/Llama-500M/kernel_config_tl1.ini`
 
 ### TL2 (x86 AVX2) Tuning Results
 
@@ -191,7 +203,7 @@ Config saved to: `tuned_kernels\Llama-500M\kernel_config_tl1.ini`
 | 1280 | 3456 | 128 | 96 | 32 | 12 |
 | 32000 | 1280 | 128 | 96 | 32 | 12 |
 
-Config saved to: `tuned_kernels\Llama-500M\kernel_config_tl2.ini`
+Config saved to: `tuned_kernels/Llama-500M/kernel_config_tl2.ini`
 
 ---
 
@@ -226,7 +238,7 @@ Config saved to: `tuned_kernels\Llama-500M\kernel_config_tl2.ini`
 | 1536 | 4096 | 128 | 128 | 64 | 52 |
 | 32000 | 1536 | 128 | 64 | 64 | 40 |
 
-Config saved to: `tuned_kernels\Llama-700M\kernel_config_tl1.ini`
+Config saved to: `tuned_kernels/Llama-700M/kernel_config_tl1.ini`
 
 ### TL2 (x86 AVX2) Tuning Results
 
@@ -237,7 +249,7 @@ Config saved to: `tuned_kernels\Llama-700M\kernel_config_tl1.ini`
 | 1536 | 4096 | 128 | 96 | 32 | 14 |
 | 32000 | 1536 | 128 | 96 | 32 | 12 |
 
-Config saved to: `tuned_kernels\Llama-700M\kernel_config_tl2.ini`
+Config saved to: `tuned_kernels/Llama-700M/kernel_config_tl2.ini`
 
 ---
 
@@ -272,7 +284,7 @@ Config saved to: `tuned_kernels\Llama-700M\kernel_config_tl2.ini`
 | 2048 | 5632 | 128 | 128 | 64 | 36 |
 | 32000 | 2048 | 128 | 128 | 64 | 40 |
 
-Config saved to: `tuned_kernels\Llama-1B\kernel_config_tl1.ini`
+Config saved to: `tuned_kernels/Llama-1B/kernel_config_tl1.ini`
 
 ### TL2 (x86 AVX2) Tuning Results
 
@@ -283,6 +295,6 @@ Config saved to: `tuned_kernels\Llama-1B\kernel_config_tl1.ini`
 | 2048 | 5632 | 128 | 96 | 32 | 10 |
 | 32000 | 2048 | 128 | 96 | 32 | 12 |
 
-Config saved to: `tuned_kernels\Llama-1B\kernel_config_tl2.ini`
+Config saved to: `tuned_kernels/Llama-1B/kernel_config_tl2.ini`
 
 ---

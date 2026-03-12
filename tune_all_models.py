@@ -41,9 +41,11 @@ sys.path.insert(0, _SCRIPT_DIR)
 
 from utils.kernel_tuner import (
     generate_configs_for_shape,
+    get_hardware_info,
     select_default_config,
     write_preset_config,
     benchmark_candidates,
+    save_tuning_csv,
     save_tuning_log,
 )
 
@@ -149,7 +151,7 @@ def save_tuned_config(model_name, arch, results, output_dir):
 # Step 5 – Markdown summary report
 # ---------------------------------------------------------------------------
 
-def generate_report(all_model_data, report_path):
+def generate_report(all_model_data, report_path, hardware_info=None):
     """
     Write a Markdown document summarising the tuning results for every model
     and architecture.
@@ -166,6 +168,8 @@ def generate_report(all_model_data, report_path):
             "tl1_config_path": str,
             "tl2_config_path": str,
         }
+    hardware_info : dict or None
+        Output of :func:`get_hardware_info`.
     """
     lines = []
 
@@ -175,6 +179,22 @@ def generate_report(all_model_data, report_path):
         f"Generated on {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
     )
     lines.append("")
+
+    # ---- Hardware configuration ---------------------------------------------
+    if hardware_info:
+        lines.append("## Hardware Configuration")
+        lines.append("")
+        lines.append("| Parameter | Value |")
+        lines.append("|-----------|-------|")
+        lines.append(f"| CPU Model | {hardware_info.get('cpu_model', 'unknown')} |")
+        lines.append(f"| CPU Architecture | {hardware_info.get('cpu_arch', 'unknown')} |")
+        lines.append(f"| Physical Cores | {hardware_info.get('cpu_cores_physical', 'N/A')} |")
+        lines.append(f"| Logical Cores | {hardware_info.get('cpu_cores_logical', 'N/A')} |")
+        ram = hardware_info.get('ram_total_gb')
+        lines.append(f"| RAM | {f'{ram} GB' if ram else 'N/A'} |")
+        lines.append(f"| OS | {hardware_info.get('os', 'unknown')} {hardware_info.get('os_version', '')} |")
+        lines.append(f"| Python | {hardware_info.get('python_version', 'unknown')} |")
+        lines.append("")
 
     # ---- Table of contents --------------------------------------------------
     lines.append("## Models")
@@ -297,13 +317,30 @@ def main():
     parser.add_argument(
         "--num-runs",
         type=int,
-        default=50,
+         default=50,
         help="Number of forward passes for benchmarking (default: 50)",
+    )
+    parser.add_argument(
+        "--csv-dir",
+        default=None,
+        help="Directory for per-model CSV summaries (default: <tuning-logs-dir>/csv)",
     )
     args = parser.parse_args()
 
     project_root = _SCRIPT_DIR
     all_model_data = OrderedDict()
+
+    # Collect hardware info once
+    hw_info = get_hardware_info()
+    print("\n🖥  Hardware Configuration")
+    print(f"  CPU:  {hw_info.get('cpu_model', 'unknown')}")
+    print(f"  Arch: {hw_info.get('cpu_arch', 'unknown')}")
+    print(f"  Cores (physical/logical): "
+          f"{hw_info.get('cpu_cores_physical', 'N/A')}/{hw_info.get('cpu_cores_logical', 'N/A')}")
+    ram = hw_info.get('ram_total_gb')
+    print(f"  RAM:  {f'{ram} GB' if ram else 'N/A'}")
+    print(f"  OS:   {hw_info.get('os', 'unknown')} {hw_info.get('os_version', '')}")
+    print(f"  Python: {hw_info.get('python_version', 'unknown')}")
 
     for model_name in args.models:
         config_dir = MODEL_CONFIGS[model_name]
@@ -359,9 +396,11 @@ def main():
             "tl2_config_path": os.path.relpath(tl2_path, project_root),
         }
 
-        # -- Step 4b (optional): benchmark & save tuning logs -----------------
+        # -- Step 4b (optional): benchmark & save tuning logs + CSV -----------
         if args.benchmark:
             logs_dir = os.path.join(project_root, args.tuning_logs_dir)
+            csv_dir = os.path.join(project_root,
+                                   args.csv_dir or os.path.join(args.tuning_logs_dir, "csv"))
 
             for arch_label, arch_tag in [("TL1", "tl1"), ("TL2", "tl2")]:
                 print(f"  Benchmarking {arch_label} candidates …")
@@ -373,9 +412,24 @@ def main():
                 )
                 log_path = save_tuning_log(
                     model_name, arch_tag, candidates, logs_dir,
+                    hardware_info=hw_info,
                 )
                 all_model_data[model_name][f"{arch_tag}_tuning_log"] = log_path
                 print(f"    Logged {len(candidates)} candidates → {log_path}")
+
+                # Save per-model, per-arch summary CSV
+                summary_csv = os.path.join(
+                    logs_dir, model_name,
+                    f"tuning_log_{arch_tag}_summary_desc.csv",
+                )
+                save_tuning_csv(model_name, arch_tag, candidates, summary_csv)
+                print(f"    Summary CSV → {summary_csv}")
+
+                # Save combined per-model CSV (both archs accumulate)
+                model_short = model_name.replace("Llama-", "")
+                combined_csv = os.path.join(csv_dir, f"{model_short}_{arch_tag}.csv")
+                save_tuning_csv(model_name, arch_tag, candidates, combined_csv)
+                print(f"    CSV → {combined_csv}")
 
                 # Show the best candidate per shape
                 shape_groups = defaultdict(list)
@@ -391,7 +445,7 @@ def main():
 
     # -- Step 5: generate report ----------------------------------------------
     report_path = os.path.join(project_root, args.report)
-    generate_report(all_model_data, report_path)
+    generate_report(all_model_data, report_path, hardware_info=hw_info)
     print(f"\n✅ Tuning report written to {report_path}")
 
 

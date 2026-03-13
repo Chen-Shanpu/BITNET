@@ -22,6 +22,8 @@ from utils.kernel_tuner import (
     generate_configs_for_shape,
     load_tuning_log,
     save_tuning_log,
+    save_tuning_log_csv,
+    select_best_from_benchmark,
     select_default_config,
 )
 
@@ -210,3 +212,143 @@ class TestTuningLogIO:
         loaded = load_tuning_log(path)
         assert "generated_at" in loaded
         assert "UTC" in loaded["generated_at"]
+
+
+# ---------------------------------------------------------------------------
+# Tests for select_best_from_benchmark
+# ---------------------------------------------------------------------------
+
+class TestSelectBestFromBenchmark:
+    """Tests for the select_best_from_benchmark() function."""
+
+    def _sample_candidates(self):
+        """Two shapes, two candidates each with different tokens_per_second."""
+        return [
+            # Shape (512, 512) – candidate A is better
+            {
+                "model_name": "Llama-80M", "M": 512, "K": 512,
+                "ROW_BLOCK_SIZE": 128, "COL_BLOCK_SIZE": 64, "PARALLEL_SIZE": 64,
+                "BM": 128, "BK": 64, "bm": 64,
+                "avg_latency_s": 0.005, "tile_latency_s": 0.0001,
+                "tokens_per_second": 20000.0, "rank": 1,
+            },
+            {
+                "model_name": "Llama-80M", "M": 512, "K": 512,
+                "ROW_BLOCK_SIZE": 64, "COL_BLOCK_SIZE": 64, "PARALLEL_SIZE": 32,
+                "BM": 64, "BK": 64, "bm": 32,
+                "avg_latency_s": 0.010, "tile_latency_s": 0.0002,
+                "tokens_per_second": 10000.0, "rank": 2,
+            },
+            # Shape (1408, 512) – only one candidate
+            {
+                "model_name": "Llama-80M", "M": 1408, "K": 512,
+                "ROW_BLOCK_SIZE": 128, "COL_BLOCK_SIZE": 64, "PARALLEL_SIZE": 64,
+                "BM": 128, "BK": 64, "bm": 64,
+                "avg_latency_s": 0.030, "tile_latency_s": 0.0002,
+                "tokens_per_second": 5000.0, "rank": 1,
+            },
+        ]
+
+    def test_returns_one_entry_per_shape(self):
+        candidates = self._sample_candidates()
+        results = select_best_from_benchmark(candidates)
+        assert len(results) == 2
+
+    def test_selects_highest_tokens_per_second(self):
+        candidates = self._sample_candidates()
+        results = select_best_from_benchmark(candidates)
+        shape_512 = next(r for r in results if r["M"] == 512 and r["K"] == 512)
+        assert shape_512["default_BM"] == 128
+        assert shape_512["default_BK"] == 64
+        assert shape_512["default_bmm"] == 64
+        assert shape_512["tokens_per_second"] == 20000.0
+
+    def test_returns_required_keys(self):
+        candidates = self._sample_candidates()
+        results = select_best_from_benchmark(candidates)
+        required = {"M", "K", "default_BM", "default_BK", "default_bmm",
+                    "num_candidates", "tokens_per_second", "avg_latency_s"}
+        for r in results:
+            assert required.issubset(r.keys()), f"Missing keys in {r}"
+
+    def test_num_candidates_is_shape_total(self):
+        candidates = self._sample_candidates()
+        results = select_best_from_benchmark(candidates)
+        shape_512 = next(r for r in results if r["M"] == 512)
+        assert shape_512["num_candidates"] == 2
+        shape_1408 = next(r for r in results if r["M"] == 1408)
+        assert shape_1408["num_candidates"] == 1
+
+    def test_preserves_shape_discovery_order(self):
+        candidates = self._sample_candidates()
+        results = select_best_from_benchmark(candidates)
+        assert results[0]["M"] == 512
+        assert results[1]["M"] == 1408
+
+    def test_empty_candidates(self):
+        results = select_best_from_benchmark([])
+        assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Tests for save_tuning_log_csv
+# ---------------------------------------------------------------------------
+
+class TestSaveTuningLogCsv:
+    """Tests for the save_tuning_log_csv() function."""
+
+    def _sample_candidates(self):
+        return [
+            {
+                "model_name": "Llama-80M", "M": 512, "K": 512,
+                "ROW_BLOCK_SIZE": 128, "COL_BLOCK_SIZE": 64, "PARALLEL_SIZE": 64,
+                "BM": 128, "BK": 64, "bm": 64,
+                "avg_latency_s": 0.005, "tile_latency_s": 0.0001,
+                "tokens_per_second": 20000.0, "rank": 1,
+            },
+            {
+                "model_name": "Llama-80M", "M": 512, "K": 512,
+                "ROW_BLOCK_SIZE": 64, "COL_BLOCK_SIZE": 64, "PARALLEL_SIZE": 32,
+                "BM": 64, "BK": 64, "bm": 32,
+                "avg_latency_s": 0.010, "tile_latency_s": 0.0002,
+                "tokens_per_second": 10000.0, "rank": 2,
+            },
+        ]
+
+    def test_creates_file(self, tmp_path):
+        candidates = self._sample_candidates()
+        path = save_tuning_log_csv("Llama-80M", "tl1", candidates, str(tmp_path))
+        assert os.path.exists(path)
+        assert path.endswith("tuning_log_tl1_summary_desc.csv")
+
+    def test_creates_model_subdir(self, tmp_path):
+        candidates = self._sample_candidates()
+        save_tuning_log_csv("Llama-80M", "tl1", candidates, str(tmp_path))
+        assert os.path.isdir(os.path.join(str(tmp_path), "Llama-80M"))
+
+    def test_csv_has_header_and_rows(self, tmp_path):
+        import csv
+        candidates = self._sample_candidates()
+        path = save_tuning_log_csv("Llama-80M", "tl2", candidates, str(tmp_path))
+        with open(path, newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        assert len(rows) == 2
+        assert "tokens_per_second" in rows[0]
+        assert "BM" in rows[0]
+
+    def test_sorted_descending_by_tokens_per_second(self, tmp_path):
+        import csv
+        candidates = self._sample_candidates()
+        path = save_tuning_log_csv("Llama-80M", "tl1", candidates, str(tmp_path))
+        with open(path, newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        tps_values = [float(r["tokens_per_second"]) for r in rows]
+        assert tps_values == sorted(tps_values, reverse=True)
+
+    def test_tl1_and_tl2_filenames_differ(self, tmp_path):
+        candidates = self._sample_candidates()
+        path1 = save_tuning_log_csv("Llama-80M", "tl1", candidates, str(tmp_path))
+        path2 = save_tuning_log_csv("Llama-80M", "tl2", candidates, str(tmp_path))
+        assert path1 != path2
+        assert "tl1" in os.path.basename(path1)
+        assert "tl2" in os.path.basename(path2)

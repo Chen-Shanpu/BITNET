@@ -601,6 +601,106 @@ def load_tuning_log(filepath):
         return json.load(fh)
 
 
+def select_best_from_benchmark(candidates):
+    """
+    Select the best kernel configuration for each unique (M, K) shape
+    from benchmark results.
+
+    For each shape the candidate with the highest ``tokens_per_second``
+    (i.e. ``rank == 1``) is chosen.  The returned list uses the same
+    ``default_BM`` / ``default_BK`` / ``default_bmm`` key names as
+    :func:`generate_model_configs` so the result can be passed directly
+    to :func:`write_preset_config` or ``save_tuned_config``.
+
+    Parameters
+    ----------
+    candidates : list[dict]
+        Output of :func:`benchmark_candidates`.
+
+    Returns
+    -------
+    list[dict]
+        One entry per unique (M, K) shape with keys:
+        ``M``, ``K``, ``default_BM``, ``default_BK``, ``default_bmm``,
+        ``num_candidates``, ``tokens_per_second``, ``avg_latency_s``.
+        Shapes are returned in the order they first appear in *candidates*.
+    """
+    shape_groups = defaultdict(list)
+    shape_order = []
+    for c in candidates:
+        key = (c["M"], c["K"])
+        if key not in shape_groups:
+            shape_order.append(key)
+        shape_groups[key].append(c)
+
+    results = []
+    for key in shape_order:
+        M, K = key
+        group = shape_groups[key]
+        best = max(group, key=lambda x: x["tokens_per_second"])
+        results.append({
+            "M": M,
+            "K": K,
+            "default_BM": best["BM"],
+            "default_BK": best["BK"],
+            "default_bmm": best["bm"],
+            "num_candidates": len(group),
+            "tokens_per_second": best["tokens_per_second"],
+            "avg_latency_s": best["avg_latency_s"],
+        })
+
+    return results
+
+
+def save_tuning_log_csv(model_name, arch, candidates, log_dir):
+    """
+    Save the tuning log for *model_name* / *arch* to a CSV summary file.
+
+    The file is written as ``tuning_log_{arch}_summary_desc.csv`` inside
+    ``{log_dir}/{model_name}/``, sorted in descending order of
+    ``tokens_per_second`` so that the best candidates appear first.
+    This format is compatible with :mod:`utils.generate_tuning_visualization`.
+
+    Parameters
+    ----------
+    model_name : str
+    arch : str
+    candidates : list[dict]
+        Output of :func:`benchmark_candidates`.
+    log_dir : str
+        Root tuning logs directory (e.g. ``tuning_logs``).
+
+    Returns
+    -------
+    str
+        Path to the written CSV file.
+    """
+    import csv
+
+    model_log_dir = os.path.join(log_dir, model_name)
+    os.makedirs(model_log_dir, exist_ok=True)
+
+    filepath = os.path.join(model_log_dir, f"tuning_log_{arch}_summary_desc.csv")
+
+    fieldnames = [
+        "model_name", "M", "K",
+        "ROW_BLOCK_SIZE", "COL_BLOCK_SIZE", "PARALLEL_SIZE",
+        "BM", "BK", "bm",
+        "avg_latency_s", "tile_latency_s", "tokens_per_second", "rank",
+    ]
+
+    sorted_candidates = sorted(
+        candidates, key=lambda x: x["tokens_per_second"], reverse=True
+    )
+
+    with open(filepath, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(sorted_candidates)
+
+    return filepath
+
+
 # =============================================================================
 # Main
 # =============================================================================

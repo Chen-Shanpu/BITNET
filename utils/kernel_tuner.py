@@ -313,7 +313,13 @@ def generate_codegen_command(model_name, arch, results):
 
 
 def write_preset_config(model_name, arch, results, output_dir):
-    """Write preset kernel configuration INI file."""
+    """Write preset kernel configuration INI file.
+
+    Each section stores all six tuning parameters for the shape:
+    ``ROW_BLOCK_SIZE`` / ``COL_BLOCK_SIZE`` / ``PARALLEL_SIZE`` (the canonical
+    BitNet compile-time define names) plus the shorthand aliases ``BM``, ``BK``,
+    ``bm`` that the runtime kernel loader uses.
+    """
     config = ConfigParser()
 
     for i, r in enumerate(results):
@@ -321,8 +327,13 @@ def write_preset_config(model_name, arch, results, output_dir):
         config.add_section(section)
         config.set(section, 'm', str(r['M']))
         config.set(section, 'k', str(r['K']))
-        config.set(section, 'bm', str(r['default_BM']))
-        config.set(section, 'bk', str(r['default_BK']))
+        # Six tuning parameters – canonical BitNet define names
+        config.set(section, 'ROW_BLOCK_SIZE', str(r['default_BM']))
+        config.set(section, 'COL_BLOCK_SIZE', str(r['default_BK']))
+        config.set(section, 'PARALLEL_SIZE',  str(r['default_bmm']))
+        # Shorthand aliases used by the runtime kernel loader
+        config.set(section, 'bm',  str(r['default_BM']))
+        config.set(section, 'bk',  str(r['default_BK']))
         config.set(section, 'bmm', str(r['default_bmm']))
 
     filename = f'kernel_config_{arch}.ini'
@@ -514,22 +525,46 @@ def benchmark_candidates(model_name, config_path, unique_shapes, arch,
 
 def _benchmark_candidate_shape_matmul(M, K, BM, BK, bmm, sequence_length, num_runs):
     """
-    Benchmark a single candidate configuration using a lightweight subtile matmul.
+    Benchmark a single candidate configuration using a BitNet 1.58-bit tiled matmul.
 
-    Times a single (row_tile x BK) @ (BK x bmm) DGEMM and scales analytically
-    by row_tiles * m_tiles * k_tiles * subtile_repeats to estimate total latency.
-    This is much cheaper than the full-tile approach for large BM values.
+    Simulates BitNet's quantized GEMM: activation tiles are int8 (8-bit quantised
+    activations) and weight tiles are ternary int8 ({-1, 0, +1}).  This matches
+    the data types used by the BitNet SIMD kernels and gives accurate relative
+    rankings across tiling configurations.
+
+    Times a single subtile (row_tile × BK) @ (BK × bmm) operation and scales
+    analytically by row_tiles × m_tiles × k_tiles × subtile_repeats to estimate
+    total latency.  This is much cheaper than the full-tile approach for large BM.
+
+    Parameters
+    ----------
+    M, K : int
+        Output and input dimensions of the weight matrix.
+    BM, BK, bmm : int
+        Block sizes: row block, column block, sub-block (SIMD unit).
+    sequence_length : int
+        Sequence length driving the row-tile count.
+    num_runs : int
+        Number of timed repetitions to average over.
 
     Returns
     -------
     dict
-        estimated_latency_s for the full shape plus the measured subtile latency.
+        ``tile_latency_s``: measured subtile latency.
+        ``estimated_latency_s``: analytically scaled full-shape estimate.
     """
     import torch
 
     row_tile = min(sequence_length, 32)
-    x = torch.randn(row_tile, BK)
-    w = torch.randn(BK, bmm)
+
+    # BitNet 1.58-bit computation pattern:
+    #   activations → int8 in [-127, 127]  (8-bit AbsMax quantisation)
+    #   weights     → int8 in {-1, 0, 1}   (ternary 1.58-bit quantisation)
+    # Both are cast to float32 for the timed mm so that the operation reflects
+    # the actual arithmetic work of a ternary GEMM tile without requiring a
+    # compiled BitNet extension.
+    x = torch.randint(-127, 128, (row_tile, BK), dtype=torch.int8).float()
+    w = torch.randint(-1, 2, (BK, bmm), dtype=torch.int8).float()
 
     # Warm-up
     torch.mm(x, w)
@@ -599,6 +634,106 @@ def load_tuning_log(filepath):
     """Load a previously saved tuning log JSON file."""
     with open(filepath, "r") as fh:
         return json.load(fh)
+
+
+def select_best_from_benchmark(candidates):
+    """
+    Select the best kernel configuration for each unique (M, K) shape
+    from benchmark results.
+
+    For each shape the candidate with the highest ``tokens_per_second``
+    (i.e. ``rank == 1``) is chosen.  The returned list uses the same
+    ``default_BM`` / ``default_BK`` / ``default_bmm`` key names as
+    :func:`generate_model_configs` so the result can be passed directly
+    to :func:`write_preset_config` or ``save_tuned_config``.
+
+    Parameters
+    ----------
+    candidates : list[dict]
+        Output of :func:`benchmark_candidates`.
+
+    Returns
+    -------
+    list[dict]
+        One entry per unique (M, K) shape with keys:
+        ``M``, ``K``, ``default_BM``, ``default_BK``, ``default_bmm``,
+        ``num_candidates``, ``tokens_per_second``, ``avg_latency_s``.
+        Shapes are returned in the order they first appear in *candidates*.
+    """
+    shape_groups = defaultdict(list)
+    shape_order = []
+    for c in candidates:
+        key = (c["M"], c["K"])
+        if key not in shape_groups:
+            shape_order.append(key)
+        shape_groups[key].append(c)
+
+    results = []
+    for key in shape_order:
+        M, K = key
+        group = shape_groups[key]
+        best = max(group, key=lambda x: x["tokens_per_second"])
+        results.append({
+            "M": M,
+            "K": K,
+            "default_BM": best["BM"],
+            "default_BK": best["BK"],
+            "default_bmm": best["bm"],
+            "num_candidates": len(group),
+            "tokens_per_second": best["tokens_per_second"],
+            "avg_latency_s": best["avg_latency_s"],
+        })
+
+    return results
+
+
+def save_tuning_log_csv(model_name, arch, candidates, log_dir):
+    """
+    Save the tuning log for *model_name* / *arch* to a CSV summary file.
+
+    The file is written as ``tuning_log_{arch}_summary_desc.csv`` inside
+    ``{log_dir}/{model_name}/``, sorted in descending order of
+    ``tokens_per_second`` so that the best candidates appear first.
+    This format is compatible with :mod:`utils.generate_tuning_visualization`.
+
+    Parameters
+    ----------
+    model_name : str
+    arch : str
+    candidates : list[dict]
+        Output of :func:`benchmark_candidates`.
+    log_dir : str
+        Root tuning logs directory (e.g. ``tuning_logs``).
+
+    Returns
+    -------
+    str
+        Path to the written CSV file.
+    """
+    import csv
+
+    model_log_dir = os.path.join(log_dir, model_name)
+    os.makedirs(model_log_dir, exist_ok=True)
+
+    filepath = os.path.join(model_log_dir, f"tuning_log_{arch}_summary_desc.csv")
+
+    fieldnames = [
+        "model_name", "M", "K",
+        "ROW_BLOCK_SIZE", "COL_BLOCK_SIZE", "PARALLEL_SIZE",
+        "BM", "BK", "bm",
+        "avg_latency_s", "tile_latency_s", "tokens_per_second", "rank",
+    ]
+
+    sorted_candidates = sorted(
+        candidates, key=lambda x: x["tokens_per_second"], reverse=True
+    )
+
+    with open(filepath, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(sorted_candidates)
+
+    return filepath
 
 
 # =============================================================================

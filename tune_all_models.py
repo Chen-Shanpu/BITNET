@@ -16,7 +16,7 @@ import argparse
 import json
 import os
 import sys
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 from configparser import ConfigParser
 from datetime import datetime, timezone
 
@@ -45,6 +45,8 @@ from utils.kernel_tuner import (
     write_preset_config,
     benchmark_candidates,
     save_tuning_log,
+    save_tuning_log_csv,
+    select_best_from_benchmark,
 )
 
 
@@ -126,15 +128,26 @@ def tune_shapes(unique_shapes, arch):
 # ---------------------------------------------------------------------------
 
 def save_tuned_config(model_name, arch, results, output_dir):
-    """Write an INI kernel config file for *arch* under *output_dir*."""
+    """Write an INI kernel config file for *arch* under *output_dir*.
+
+    Each section stores all six tuning parameters for the shape:
+    ``ROW_BLOCK_SIZE`` / ``COL_BLOCK_SIZE`` / ``PARALLEL_SIZE`` (the canonical
+    BitNet compile-time define names) plus the shorthand aliases ``BM``, ``BK``,
+    ``bm`` that the runtime kernel loader uses.
+    """
     cfg = ConfigParser()
     for i, r in enumerate(results):
         section = f"Kernels_{i}"
         cfg.add_section(section)
         cfg.set(section, "m", str(r["M"]))
         cfg.set(section, "k", str(r["K"]))
-        cfg.set(section, "bm", str(r["default_BM"]))
-        cfg.set(section, "bk", str(r["default_BK"]))
+        # Six tuning parameters – canonical BitNet define names
+        cfg.set(section, "ROW_BLOCK_SIZE", str(r["default_BM"]))
+        cfg.set(section, "COL_BLOCK_SIZE", str(r["default_BK"]))
+        cfg.set(section, "PARALLEL_SIZE",  str(r["default_bmm"]))
+        # Shorthand aliases used by the runtime kernel loader
+        cfg.set(section, "bm",  str(r["default_BM"]))
+        cfg.set(section, "bk",  str(r["default_BK"]))
         cfg.set(section, "bmm", str(r["default_bmm"]))
 
     model_dir = os.path.join(output_dir, model_name)
@@ -212,37 +225,50 @@ def generate_report(all_model_data, report_path):
             lines.append(f"| {idx} | {M} | {K} |")
         lines.append("")
 
-        # TL1 results
-        lines.append("### TL1 (ARM NEON) Tuning Results")
-        lines.append("")
-        lines.append("| M | K | BM | BK | bm | Candidates |")
-        lines.append("|---|---|----|----|-----|------------|")
-        for r in data["tl1_results"]:
-            bm_str = str(r["default_BM"]) if r["default_BM"] is not None else "—"
-            bk_str = str(r["default_BK"]) if r["default_BK"] is not None else "—"
-            bmm_str = str(r["default_bmm"]) if r["default_bmm"] is not None else "—"
-            lines.append(
-                f"| {r['M']} | {r['K']} | {bm_str} | {bk_str} | {bmm_str} | {r['num_candidates']} |"
-            )
-        lines.append("")
-        lines.append(f"Config saved to: `{data['tl1_config_path']}`")
-        lines.append("")
+        benchmarked = data.get("benchmarked", False)
 
-        # TL2 results
-        lines.append("### TL2 (x86 AVX2) Tuning Results")
-        lines.append("")
-        lines.append("| M | K | BM | BK | bm | Candidates |")
-        lines.append("|---|---|----|----|-----|------------|")
-        for r in data["tl2_results"]:
-            bm_str = str(r["default_BM"]) if r["default_BM"] is not None else "—"
-            bk_str = str(r["default_BK"]) if r["default_BK"] is not None else "—"
-            bmm_str = str(r["default_bmm"]) if r["default_bmm"] is not None else "—"
-            lines.append(
-                f"| {r['M']} | {r['K']} | {bm_str} | {bk_str} | {bmm_str} | {r['num_candidates']} |"
+        def _results_table(arch_label, results, config_path):
+            tl_lines = []
+            tl_lines.append(f"### {arch_label} Tuning Results")
+            if benchmarked:
+                tl_lines.append("*(parameters selected from benchmark measurements)*")
+            tl_lines.append("")
+            if benchmarked:
+                tl_lines.append("| M | K | BM | BK | bm | Candidates | tokens/s |")
+                tl_lines.append("|---|---|----|----|-----|------------|----------|")
+            else:
+                tl_lines.append("| M | K | BM | BK | bm | Candidates |")
+                tl_lines.append("|---|---|----|----|-----|------------|")
+            for r in results:
+                bm_str = str(r["default_BM"]) if r["default_BM"] is not None else "—"
+                bk_str = str(r["default_BK"]) if r["default_BK"] is not None else "—"
+                bmm_str = str(r["default_bmm"]) if r["default_bmm"] is not None else "—"
+                if benchmarked and "tokens_per_second" in r:
+                    tps_str = f"{r['tokens_per_second']:.1f}"
+                    tl_lines.append(
+                        f"| {r['M']} | {r['K']} | {bm_str} | {bk_str} | {bmm_str}"
+                        f" | {r['num_candidates']} | {tps_str} |"
+                    )
+                else:
+                    tl_lines.append(
+                        f"| {r['M']} | {r['K']} | {bm_str} | {bk_str} | {bmm_str}"
+                        f" | {r['num_candidates']} |"
+                    )
+            tl_lines.append("")
+            tl_lines.append(f"Config saved to: `{config_path}`")
+            tl_lines.append("")
+            return tl_lines
+
+        lines.extend(
+            _results_table(
+                "TL1 (ARM NEON)", data["tl1_results"], data["tl1_config_path"]
             )
-        lines.append("")
-        lines.append(f"Config saved to: `{data['tl2_config_path']}`")
-        lines.append("")
+        )
+        lines.extend(
+            _results_table(
+                "TL2 (x86 AVX2)", data["tl2_results"], data["tl2_config_path"]
+            )
+        )
         lines.append("---")
         lines.append("")
 
@@ -327,41 +353,15 @@ def main():
         with open(config_path, "r") as fh:
             config_dict = json.load(fh)
 
-        # -- Step 3: kernel tuning --------------------------------------------
-        print("  Tuning TL1 (ARM NEON) …")
-        tl1_results = tune_shapes(unique_shapes, "tl1")
-        for r in tl1_results:
-            print(f"    M={r['M']}, K={r['K']}  →  "
-                  f"BM={r['default_BM']}, BK={r['default_BK']}, "
-                  f"bm={r['default_bmm']}  ({r['num_candidates']} candidates)")
-
-        print("  Tuning TL2 (x86 AVX2) …")
-        tl2_results = tune_shapes(unique_shapes, "tl2")
-        for r in tl2_results:
-            print(f"    M={r['M']}, K={r['K']}  →  "
-                  f"BM={r['default_BM']}, BK={r['default_BK']}, "
-                  f"bm={r['default_bmm']}  ({r['num_candidates']} candidates)")
-
-        # -- Step 4: save configs ---------------------------------------------
+        # -- Step 3 & 4: kernel tuning + save configs -------------------------
         output_dir = os.path.join(project_root, args.output_dir)
-        tl1_path = save_tuned_config(model_name, "tl1", tl1_results, output_dir)
-        tl2_path = save_tuned_config(model_name, "tl2", tl2_results, output_dir)
-        print(f"  Saved TL1 config → {tl1_path}")
-        print(f"  Saved TL2 config → {tl2_path}")
 
-        all_model_data[model_name] = {
-            "config": config_dict,
-            "layer_details": layer_details,
-            "unique_shapes": unique_shapes,
-            "tl1_results": tl1_results,
-            "tl2_results": tl2_results,
-            "tl1_config_path": os.path.relpath(tl1_path, project_root),
-            "tl2_config_path": os.path.relpath(tl2_path, project_root),
-        }
-
-        # -- Step 4b (optional): benchmark & save tuning logs -----------------
         if args.benchmark:
+            # Benchmark-driven tuning: measure all candidate configurations,
+            # select the best per shape, then write the optimal kernel configs.
             logs_dir = os.path.join(project_root, args.tuning_logs_dir)
+            tl1_results = None
+            tl2_results = None
 
             for arch_label, arch_tag in [("TL1", "tl1"), ("TL2", "tl2")]:
                 print(f"  Benchmarking {arch_label} candidates …")
@@ -371,23 +371,80 @@ def main():
                     batch_size=1,
                     num_runs=args.num_runs,
                 )
-                log_path = save_tuning_log(
-                    model_name, arch_tag, candidates, logs_dir,
-                )
-                all_model_data[model_name][f"{arch_tag}_tuning_log"] = log_path
+
+                # Persist full log (JSON) and ranked CSV summary
+                log_path = save_tuning_log(model_name, arch_tag, candidates, logs_dir)
+                csv_path = save_tuning_log_csv(model_name, arch_tag, candidates, logs_dir)
                 print(f"    Logged {len(candidates)} candidates → {log_path}")
+                print(f"    CSV summary → {csv_path}")
+
+                # Pick the best config per shape from the benchmark results
+                best_results = select_best_from_benchmark(candidates)
+
+                if arch_tag == "tl1":
+                    tl1_results = best_results
+                else:
+                    tl2_results = best_results
 
                 # Show the best candidate per shape
-                shape_groups = defaultdict(list)
-                for c in candidates:
-                    shape_groups[(c["M"], c["K"])].append(c)
-                for (M, K), group in shape_groups.items():
-                    ranked = sorted(group, key=lambda x: x["rank"])
-                    best = ranked[0]
-                    print(f"    Shape (M={M}, K={K}): best "
-                          f"BM={best['BM']}, BK={best['BK']}, bm={best['bm']}  "
-                          f"({best['tokens_per_second']:.1f} tokens/s, "
-                          f"rank {best['rank']}/{len(group)})")
+                for r in best_results:
+                    print(
+                        f"    Shape (M={r['M']}, K={r['K']}): best "
+                        f"BM={r['default_BM']}, BK={r['default_BK']}, "
+                        f"bm={r['default_bmm']}  "
+                        f"({r['tokens_per_second']:.1f} tokens/s, "
+                        f"{r['num_candidates']} candidates)"
+                    )
+
+            # Write benchmark-optimal kernel configs to tuned_kernels/
+            tl1_path = save_tuned_config(model_name, "tl1", tl1_results, output_dir)
+            tl2_path = save_tuned_config(model_name, "tl2", tl2_results, output_dir)
+            print(f"  Saved TL1 config (benchmark-optimal) → {tl1_path}")
+            print(f"  Saved TL2 config (benchmark-optimal) → {tl2_path}")
+
+            # Also update the preset_kernels/ directory so the runtime picks up
+            # the benchmark-optimal parameters immediately.
+            preset_dir = os.path.join(project_root, "preset_kernels", model_name)
+            write_preset_config(model_name, "tl1", tl1_results, preset_dir)
+            write_preset_config(model_name, "tl2", tl2_results, preset_dir)
+            print(f"  Updated preset_kernels/{model_name}/ with benchmark-optimal configs")
+
+            benchmarked = True
+
+        else:
+            # Heuristic tuning: fast path using scoring heuristics (no benchmarks).
+            print("  Tuning TL1 (ARM NEON) …")
+            tl1_results = tune_shapes(unique_shapes, "tl1")
+            for r in tl1_results:
+                print(f"    M={r['M']}, K={r['K']}  →  "
+                      f"BM={r['default_BM']}, BK={r['default_BK']}, "
+                      f"bm={r['default_bmm']}  ({r['num_candidates']} candidates)")
+
+            print("  Tuning TL2 (x86 AVX2) …")
+            tl2_results = tune_shapes(unique_shapes, "tl2")
+            for r in tl2_results:
+                print(f"    M={r['M']}, K={r['K']}  →  "
+                      f"BM={r['default_BM']}, BK={r['default_BK']}, "
+                      f"bm={r['default_bmm']}  ({r['num_candidates']} candidates)")
+
+            tl1_path = save_tuned_config(model_name, "tl1", tl1_results, output_dir)
+            tl2_path = save_tuned_config(model_name, "tl2", tl2_results, output_dir)
+            print(f"  Saved TL1 config → {tl1_path}")
+            print(f"  Saved TL2 config → {tl2_path}")
+
+            benchmarked = False
+
+        all_model_data[model_name] = {
+            "config": config_dict,
+            "layer_details": layer_details,
+            "unique_shapes": unique_shapes,
+            "tl1_results": tl1_results,
+            "tl2_results": tl2_results,
+            "tl1_config_path": os.path.relpath(tl1_path, project_root),
+            "tl2_config_path": os.path.relpath(tl2_path, project_root),
+            "benchmarked": benchmarked,
+        }
+
 
     # -- Step 5: generate report ----------------------------------------------
     report_path = os.path.join(project_root, args.report)

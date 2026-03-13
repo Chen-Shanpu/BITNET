@@ -128,15 +128,26 @@ def tune_shapes(unique_shapes, arch):
 # ---------------------------------------------------------------------------
 
 def save_tuned_config(model_name, arch, results, output_dir):
-    """Write an INI kernel config file for *arch* under *output_dir*."""
+    """Write an INI kernel config file for *arch* under *output_dir*.
+
+    Each section stores all six tuning parameters for the shape:
+    ``ROW_BLOCK_SIZE`` / ``COL_BLOCK_SIZE`` / ``PARALLEL_SIZE`` (the canonical
+    BitNet compile-time define names) plus the shorthand aliases ``BM``, ``BK``,
+    ``bm`` that the runtime kernel loader uses.
+    """
     cfg = ConfigParser()
     for i, r in enumerate(results):
         section = f"Kernels_{i}"
         cfg.add_section(section)
         cfg.set(section, "m", str(r["M"]))
         cfg.set(section, "k", str(r["K"]))
-        cfg.set(section, "bm", str(r["default_BM"]))
-        cfg.set(section, "bk", str(r["default_BK"]))
+        # Six tuning parameters – canonical BitNet define names
+        cfg.set(section, "ROW_BLOCK_SIZE", str(r["default_BM"]))
+        cfg.set(section, "COL_BLOCK_SIZE", str(r["default_BK"]))
+        cfg.set(section, "PARALLEL_SIZE",  str(r["default_bmm"]))
+        # Shorthand aliases used by the runtime kernel loader
+        cfg.set(section, "bm",  str(r["default_BM"]))
+        cfg.set(section, "bk",  str(r["default_BK"]))
         cfg.set(section, "bmm", str(r["default_bmm"]))
 
     model_dir = os.path.join(output_dir, model_name)

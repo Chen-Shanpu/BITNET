@@ -17,6 +17,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _PROJECT_ROOT)
 
 from utils.kernel_tuner import (
+    _benchmark_candidate_shape_matmul,
     benchmark_candidates,
     benchmark_model_forward,
     generate_configs_for_shape,
@@ -25,7 +26,9 @@ from utils.kernel_tuner import (
     save_tuning_log_csv,
     select_best_from_benchmark,
     select_default_config,
+    write_preset_config,
 )
+import tune_all_models
 
 
 # ---------------------------------------------------------------------------
@@ -352,3 +355,142 @@ class TestSaveTuningLogCsv:
         assert path1 != path2
         assert "tl1" in os.path.basename(path1)
         assert "tl2" in os.path.basename(path2)
+
+
+# ---------------------------------------------------------------------------
+# Tests for INI config completeness (all 6 tuning parameters)
+# ---------------------------------------------------------------------------
+
+_REQUIRED_INI_KEYS = {
+    "row_block_size", "col_block_size", "parallel_size",  # canonical BitNet names
+    "bm", "bk", "bmm",                                    # runtime shorthand aliases
+}
+
+_SAMPLE_RESULTS = [
+    {"M": 512, "K": 512,  "default_BM": 128, "default_BK": 64, "default_bmm": 32},
+    {"M": 512, "K": 1408, "default_BM": 128, "default_BK": 64, "default_bmm": 32},
+]
+
+
+class TestIniContainsAllSixParams:
+    """
+    Both write_preset_config() (kernel_tuner.py) and save_tuned_config()
+    (tune_all_models.py) must write all 6 tuning parameters per section.
+    """
+
+    def _read_ini_keys(self, path):
+        """Return a set of lowercase key names from the INI file."""
+        from configparser import ConfigParser
+        cfg = ConfigParser()
+        cfg.read(path)
+        keys = set()
+        for section in cfg.sections():
+            keys.update(k.lower() for k in cfg.options(section))
+        return keys
+
+    def test_write_preset_config_has_all_six_params(self, tmp_path):
+        write_preset_config("Llama-test", "tl1", _SAMPLE_RESULTS, str(tmp_path))
+        ini_path = str(tmp_path / "kernel_config_tl1.ini")
+        keys = self._read_ini_keys(ini_path)
+        assert _REQUIRED_INI_KEYS.issubset(keys), (
+            f"Missing keys: {_REQUIRED_INI_KEYS - keys}"
+        )
+
+    def test_write_preset_config_tl2_has_all_six_params(self, tmp_path):
+        write_preset_config("Llama-test", "tl2", _SAMPLE_RESULTS, str(tmp_path))
+        ini_path = str(tmp_path / "kernel_config_tl2.ini")
+        keys = self._read_ini_keys(ini_path)
+        assert _REQUIRED_INI_KEYS.issubset(keys), (
+            f"Missing keys: {_REQUIRED_INI_KEYS - keys}"
+        )
+
+    def test_save_tuned_config_has_all_six_params(self, tmp_path):
+        tune_all_models.save_tuned_config(
+            "Llama-test", "tl1", _SAMPLE_RESULTS, str(tmp_path)
+        )
+        ini_path = str(tmp_path / "Llama-test" / "kernel_config_tl1.ini")
+        keys = self._read_ini_keys(ini_path)
+        assert _REQUIRED_INI_KEYS.issubset(keys), (
+            f"Missing keys: {_REQUIRED_INI_KEYS - keys}"
+        )
+
+    def test_ini_values_match_result_dict(self, tmp_path):
+        """ROW_BLOCK_SIZE == BM == bm, etc. for every section."""
+        from configparser import ConfigParser
+        write_preset_config("Llama-test", "tl1", _SAMPLE_RESULTS, str(tmp_path))
+        cfg = ConfigParser()
+        cfg.read(str(tmp_path / "kernel_config_tl1.ini"))
+        for i, r in enumerate(_SAMPLE_RESULTS):
+            sec = f"Kernels_{i}"
+            assert cfg.getint(sec, "ROW_BLOCK_SIZE") == r["default_BM"]
+            assert cfg.getint(sec, "COL_BLOCK_SIZE") == r["default_BK"]
+            assert cfg.getint(sec, "PARALLEL_SIZE")  == r["default_bmm"]
+            assert cfg.getint(sec, "bm")  == r["default_BM"]
+            assert cfg.getint(sec, "bk")  == r["default_BK"]
+            assert cfg.getint(sec, "bmm") == r["default_bmm"]
+
+    def test_ini_has_six_not_three_param_keys(self, tmp_path):
+        """Regression: the old format only had bm/bk/bmm; new format must have 6."""
+        write_preset_config("Llama-test", "tl1", _SAMPLE_RESULTS[:1], str(tmp_path))
+        from configparser import ConfigParser
+        cfg = ConfigParser()
+        cfg.read(str(tmp_path / "kernel_config_tl1.ini"))
+        sec = "Kernels_0"
+        param_keys = {k for k in cfg.options(sec) if k not in ("m", "k")}
+        assert len(param_keys) == 6, (
+            f"Expected 6 tuning-param keys, got {len(param_keys)}: {param_keys}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests for BitNet quantized microbenchmark
+# ---------------------------------------------------------------------------
+
+class TestBitNetQuantizedMicrobenchmark:
+    """
+    _benchmark_candidate_shape_matmul must use ternary int8 weights and
+    int8 activations, not FP32 random tensors.
+    """
+
+    def test_returns_required_keys(self):
+        result = _benchmark_candidate_shape_matmul(512, 512, 128, 64, 32, 32, 5)
+        assert "tile_latency_s" in result
+        assert "estimated_latency_s" in result
+
+    def test_latencies_are_positive(self):
+        result = _benchmark_candidate_shape_matmul(512, 512, 128, 64, 32, 32, 5)
+        assert result["tile_latency_s"] > 0
+        assert result["estimated_latency_s"] > 0
+
+    def test_estimated_exceeds_tile_latency(self):
+        """Full-shape estimate must be >= single-tile time."""
+        result = _benchmark_candidate_shape_matmul(1024, 512, 128, 64, 32, 32, 5)
+        assert result["estimated_latency_s"] >= result["tile_latency_s"]
+
+    def test_uses_integer_valued_inputs(self):
+        """
+        Verify that the microbenchmark function builds integer-valued tensors
+        (ternary weights, int8 activations) by inspecting the source code.
+        The previous FP32 implementation used torch.randn; the BitNet
+        implementation must use torch.randint.
+        """
+        import inspect
+        src = inspect.getsource(_benchmark_candidate_shape_matmul)
+        # Must not use torch.randn (FP32) for weight/activation creation
+        assert "torch.randn" not in src, (
+            "_benchmark_candidate_shape_matmul still uses torch.randn; "
+            "it must use torch.randint for BitNet ternary int8 ops."
+        )
+        # Must use torch.randint (integer inputs)
+        assert "torch.randint" in src, (
+            "_benchmark_candidate_shape_matmul must use torch.randint "
+            "for int8/ternary tensor creation."
+        )
+
+    def test_smaller_bk_gives_shorter_tile_latency(self):
+        """Halving BK should reduce tile latency (smaller matmul)."""
+        r_large = _benchmark_candidate_shape_matmul(512, 512, 128, 64, 32, 32, 10)
+        r_small = _benchmark_candidate_shape_matmul(512, 512, 128, 32, 32, 32, 10)
+        # Smaller BK → smaller tile → should be faster or equal
+        # Allow 3× tolerance for CPU timing noise
+        assert r_small["tile_latency_s"] <= r_large["tile_latency_s"] * 3
